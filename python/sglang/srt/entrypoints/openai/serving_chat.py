@@ -276,7 +276,7 @@ class OpenAIServingChat(OpenAIServingBase):
             # Find the index of the first user message
             first_user_idx = next((i for i, msg in enumerate(request.messages) if msg.role == "user"), None)
 
-            # Insert a system message right before the first user message
+            # Insert the prohibition message before or after the first user message based on SGLANG_INSERT_TOOL_PROHIBIT_LOCATION
             if first_user_idx is not None:
                 prohibition_msg = ChatCompletionMessageGenericParam(
                     role="system",
@@ -284,10 +284,15 @@ class OpenAIServingChat(OpenAIServingBase):
                 )
                 # Create a new messages list with the prohibition message inserted
                 new_messages = list(request.messages)
-                new_messages.insert(first_user_idx, prohibition_msg)
+                insert_location = envs.SGLANG_INSERT_TOOL_PROHIBIT_LOCATION.get()
+                if insert_location == "after":
+                    new_messages.insert(first_user_idx + 1, prohibition_msg)
+                else:
+                    # Default to "before"
+                    new_messages.insert(first_user_idx, prohibition_msg)
                 request.messages = new_messages
                 logger.debug(
-                    f"Inserted tool prohibition system message for tool_choice=none"
+                    f"Inserted tool prohibition system message for tool_choice=none at location: {insert_location}"
                 )
 
         tool_call_constraint = None
