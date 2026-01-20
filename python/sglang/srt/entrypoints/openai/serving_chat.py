@@ -112,9 +112,7 @@ class OpenAIServingChat(OpenAIServingBase):
                 f"Tool token suppression enabled. Tokens to suppress when tool_choice=none: {tool_tokens_to_suppress}"
             )
         if envs.SGLANG_BIAS_TOOL_WHEN_NONE.get():
-            logger.info(
-                f"Tool token logit bias enabled when tool_choice=none"
-            )
+            logger.info(f"Tool token logit bias enabled when tool_choice=none")
 
         # Check if the model is a GPT-OSS model
         self.is_gpt_oss = (
@@ -522,6 +520,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     tools=tools,
                     reasoning_effort=request.reasoning_effort,
                     **chat_template_kwargs,
+                    return_dict=False,
                 )
             except Exception as e:
                 # If the first attempt fails, try transforming the tools format
@@ -540,6 +539,7 @@ class OpenAIServingChat(OpenAIServingBase):
                         tools=tools,
                         reasoning_effort=request.reasoning_effort,
                         **chat_template_kwargs,
+                        return_dict=False,
                     )
                 except jinja2.TemplateError as template_error:
                     # Template errors (e.g., from raise_exception in Jinja templates)
