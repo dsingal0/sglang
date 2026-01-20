@@ -43,6 +43,7 @@ try:
 except:
     StructuralTag = Any
 
+from sglang.srt.environ import envs
 from sglang.utils import convert_json_schema_to_str
 
 logger = logging.getLogger(__name__)
@@ -596,7 +597,7 @@ class ChatCompletionRequest(BaseModel):
                 ctk = values.get("chat_template_kwargs")
                 if not isinstance(ctk, dict):
                     ctk = {}
-                ctk.setdefault("thinking", True)
+                ctk.setdefault("enable_thinking", True)
                 values["chat_template_kwargs"] = ctk
 
         return values
@@ -675,6 +676,24 @@ class ChatCompletionRequest(BaseModel):
             "custom_params": self.custom_params,
             "sampling_seed": self.seed,
         }
+
+        # Apply tool token logit bias when tool_choice is "none" and SGLANG_BIAS_TOOL_WHEN_NONE is enabled
+        if (
+            self.tool_choice == "none"
+            and envs.SGLANG_BIAS_TOOL_WHEN_NONE.get()
+            and (tool_tokens := envs.SGLANG_TOOL_TOKENS_TO_SUPPRESS.get())
+        ):
+            existing_bias = sampling_params["logit_bias"] or {}
+            for tool_token_id in tool_tokens:
+                token_key = str(tool_token_id)
+                if token_key not in existing_bias:
+                    existing_bias = dict(existing_bias)
+                    existing_bias[token_key] = -100.0
+            sampling_params["logit_bias"] = existing_bias
+            if existing_bias:
+                logger.info(
+                    f"Applied logit bias of -100.0 to tokens {list(existing_bias.keys())} for tool_choice=none"
+                )
 
         if self.response_format and self.response_format.type == "json_schema":
             sampling_params["json_schema"] = convert_json_schema_to_str(

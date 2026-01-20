@@ -15,6 +15,7 @@ from jsonschema import Draft202012Validator, SchemaError
 
 from sglang.srt.entrypoints.openai.encoding_dsv32 import encode_messages
 from sglang.srt.entrypoints.openai.protocol import (
+    ChatCompletionMessageGenericParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
@@ -39,6 +40,7 @@ from sglang.srt.entrypoints.openai.utils import (
     process_hidden_states_from_ret,
     to_openai_style_logprobs,
 )
+from sglang.srt.environ import envs
 from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
@@ -102,6 +104,15 @@ class OpenAIServingChat(OpenAIServingBase):
             logger.info(
                 f"Using default chat sampling params from model generation config: {self.default_sampling_params}",
             )
+
+        # Log tool token suppression configuration
+        tool_tokens_to_suppress = envs.SGLANG_TOOL_TOKENS_TO_SUPPRESS.get()
+        if tool_tokens_to_suppress:
+            logger.info(
+                f"Tool token suppression enabled. Tokens to suppress when tool_choice=none: {tool_tokens_to_suppress}"
+            )
+        if envs.SGLANG_BIAS_TOOL_WHEN_NONE.get():
+            logger.info(f"Tool token logit bias enabled when tool_choice=none")
 
         # Check if the model is a GPT-OSS model
         self.is_gpt_oss = (
@@ -182,6 +193,9 @@ class OpenAIServingChat(OpenAIServingBase):
 
     def _validate_request(self, request: ChatCompletionRequest) -> Optional[str]:
         """Validate that the input is valid."""
+        if error_msg := super()._validate_request(request):
+            return error_msg
+
         if not request.messages:
             return "Messages cannot be empty."
 
@@ -320,6 +334,49 @@ class OpenAIServingChat(OpenAIServingBase):
         if self.is_gpt_oss:
             request.skip_special_tokens = False
 
+        # Insert tool prohibition text into the last message when tool_choice is "none"
+        # and SGLANG_INSERT_TOOL_PROHIBIT is set to a non-empty string
+        tool_prohibit_msg = envs.SGLANG_INSERT_TOOL_PROHIBIT.get()
+        tool_prohibit_method = envs.SGLANG_INSERT_TOOL_PROHIBIT_METHOD.get()
+        if request.tool_choice == "none" and tool_prohibit_msg and request.messages:
+            valid_methods = {"last_message", "new_turn"}
+            if tool_prohibit_method not in valid_methods:
+                logger.warning(
+                    f"Invalid SGLANG_INSERT_TOOL_PROHIBIT_METHOD value: '{tool_prohibit_method}'. "
+                    f"Valid values are: {valid_methods}. Using default 'last_message'."
+                )
+                tool_prohibit_method = "last_message"
+            if tool_prohibit_method == "new_turn":
+                from sglang.srt.entrypoints.openai.protocol import (
+                    ChatCompletionMessageUserParam,
+                )
+
+                request.messages.append(
+                    ChatCompletionMessageUserParam(
+                        role="user",
+                        content=tool_prohibit_msg,
+                    )
+                )
+                logger.info(
+                    f"Inserted tool prohibition text as new user turn for tool_choice=none"
+                )
+            else:
+                last_msg = request.messages[-1]
+
+                # Get current content and handle None/empty cases
+                current_content = last_msg.content
+                if current_content is None:
+                    current_content = ""
+                elif not isinstance(current_content, str):
+                    # If content is a list (e.g., multimodal), convert to string representation
+                    current_content = str(current_content)
+
+                new_content = current_content + tool_prohibit_msg
+                last_msg.content = new_content
+                logger.info(
+                    f"Inserted tool prohibition text to last message for tool_choice=none"
+                )
+
         tool_call_constraint = None
 
         # Apply chat template and its stop strings
@@ -377,7 +434,8 @@ class OpenAIServingChat(OpenAIServingBase):
         if self.use_dpsk_v32_encoding:
             thinking_mode = (
                 "thinking"
-                if (request.chat_template_kwargs or {}).get("thinking")
+                if (request.chat_template_kwargs or {}).get("enable_thinking")
+                or (request.chat_template_kwargs or {}).get("thinking")
                 else "chat"
             )
             messages = request.messages
@@ -442,6 +500,18 @@ class OpenAIServingChat(OpenAIServingBase):
                 self._handle_last_assistant_message(openai_compatible_messages, request)
             )
 
+            # Prepare chat template kwargs, respecting SGLANG_REASONING_OFF_BY_DEFAULT
+            chat_template_kwargs = {}
+            if request.chat_template_kwargs:
+                chat_template_kwargs = request.chat_template_kwargs.copy()
+            # If reasoning is off by default, ensure enable_thinking is False (unless explicitly set)
+            if envs.SGLANG_REASONING_OFF_BY_DEFAULT.get():
+                if "enable_thinking" not in chat_template_kwargs:
+                    chat_template_kwargs["enable_thinking"] = False
+                    logger.info(
+                        f"SGLANG_REASONING_OFF_BY_DEFAULT=True, setting enable_thinking=False in chat template kwargs"
+                    )
+
             try:
                 prompt_ids = self.tokenizer_manager.tokenizer.apply_chat_template(
                     openai_compatible_messages,
@@ -449,11 +519,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     add_generation_prompt=True,
                     tools=tools,
                     reasoning_effort=request.reasoning_effort,
-                    **(
-                        request.chat_template_kwargs
-                        if request.chat_template_kwargs
-                        else {}
-                    ),
+                    **chat_template_kwargs,
                     return_dict=False,
                 )
             except Exception as e:
@@ -472,11 +538,7 @@ class OpenAIServingChat(OpenAIServingBase):
                         add_generation_prompt=True,
                         tools=tools,
                         reasoning_effort=request.reasoning_effort,
-                        **(
-                            request.chat_template_kwargs
-                            if request.chat_template_kwargs
-                            else {}
-                        ),
+                        **chat_template_kwargs,
                         return_dict=False,
                     )
                 except jinja2.TemplateError as template_error:
@@ -875,24 +937,25 @@ class OpenAIServingChat(OpenAIServingBase):
             reasoning_text = None
             reasoning_parser = self.reasoning_parser
             if reasoning_parser and request.separate_reasoning:
+                reasoning_off_by_default = envs.SGLANG_REASONING_OFF_BY_DEFAULT.get()
+                template_force_reasoning = self.template_manager.force_reasoning
+                request_reasoning = self._get_reasoning_from_request(request)
                 is_force_reasoning = (
-                    self.template_manager.force_reasoning
-                    or self._get_reasoning_from_request(request)
+                    not reasoning_off_by_default and template_force_reasoning
+                ) or request_reasoning
+                logger.info(
+                    f"Reasoning force calculation: "
+                    f"SGLANG_REASONING_OFF_BY_DEFAULT={reasoning_off_by_default}, "
+                    f"template.force_reasoning={template_force_reasoning}, "
+                    f"request_reasoning={request_reasoning}, "
+                    f"is_force_reasoning={is_force_reasoning}"
                 )
-                try:
-                    parser = ReasoningParser(
-                        model_type=reasoning_parser,
-                        stream_reasoning=False,
-                        force_reasoning=is_force_reasoning,
-                    )
-                    reasoning_text, text = parser.parse_non_stream(text)
-                except Exception as e:
-                    logger.error(f"Reasoning parsing error: {e}")
-                    return self.create_error_response(
-                        "Failed to parse reasoning content",
-                        err_type="InternalServerError",
-                        status_code=500,
-                    )
+            elif request.separate_reasoning:
+                reasoning_off_by_default = envs.SGLANG_REASONING_OFF_BY_DEFAULT.get()
+                logger.info(
+                    f"No reasoning parser configured, SGLANG_REASONING_OFF_BY_DEFAULT={reasoning_off_by_default}, "
+                    f"skipping reasoning parsing"
+                )
 
             # Handle tool calls
             tool_calls = None
@@ -1011,7 +1074,7 @@ class OpenAIServingChat(OpenAIServingBase):
             # Align with Kimi-K2 format: functions.{name}:{index}
             # Kimi-K2 allows multiple tool_calls in one message; SGLang sets call_item.tool_index to the *local* position inside that message.
             # Therefore, the index must be corrected by using `history_tool_calls_cnt + call_item.tool_index` to ensure globally unique and properly ordered.
-            tool_call_id = f"functions.{call_item.name}:{history_tool_calls_cnt+call_item.tool_index}"
+            tool_call_id = f"functions.{call_item.name}:{history_tool_calls_cnt + call_item.tool_index}"
             logger.debug(
                 f"Process tool call idx, parser: {self.tool_call_parser}, tool_call_id: {tool_call_id}, history_cnt: {history_tool_calls_cnt}"
             )
@@ -1122,9 +1185,27 @@ class OpenAIServingChat(OpenAIServingBase):
     ) -> tuple[Optional[str], str]:
         """Process reasoning content in streaming response"""
         if index not in reasoning_parser_dict:
+            if not self.reasoning_parser:
+                reasoning_off_by_default = envs.SGLANG_REASONING_OFF_BY_DEFAULT.get()
+                logger.info(
+                    f"Streaming (index={index}): No reasoning parser configured, "
+                    f"SGLANG_REASONING_OFF_BY_DEFAULT={reasoning_off_by_default}, "
+                    f"skipping reasoning parsing"
+                )
+                reasoning_parser_dict[index] = None
+                return None, delta
+            reasoning_off_by_default = envs.SGLANG_REASONING_OFF_BY_DEFAULT.get()
+            template_force_reasoning = self.template_manager.force_reasoning
+            request_reasoning = self._get_reasoning_from_request(request)
             is_force_reasoning = (
-                self.template_manager.force_reasoning
-                or self._get_reasoning_from_request(request)
+                not reasoning_off_by_default and template_force_reasoning
+            ) or request_reasoning
+            logger.info(
+                f"Streaming reasoning force calculation (index={index}): "
+                f"SGLANG_REASONING_OFF_BY_DEFAULT={reasoning_off_by_default}, "
+                f"template.force_reasoning={template_force_reasoning}, "
+                f"request_reasoning={request_reasoning}, "
+                f"is_force_reasoning={is_force_reasoning}"
             )
             reasoning_parser_dict[index] = ReasoningParser(
                 self.reasoning_parser,
@@ -1156,19 +1237,34 @@ class OpenAIServingChat(OpenAIServingBase):
 
     def _get_reasoning_from_request(self, request: ChatCompletionRequest) -> bool:
         """Judge whether the request needs reasoning"""
-        if not self.reasoning_parser:
-            return False
-        if self.reasoning_parser in ["deepseek-v3"]:
+        # If reasoning_off_by_default is set, reasoning is off unless explicitly requested
+        reasoning_off_by_default = envs.SGLANG_REASONING_OFF_BY_DEFAULT.get()
+
+        if reasoning_off_by_default:
+            # Reasoning is off by default, only enable if explicitly requested
             return (
                 request.chat_template_kwargs is not None
-                and request.chat_template_kwargs.get("thinking") is True
+                and request.chat_template_kwargs.get("enable_thinking") is True
             )
-        if self.reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1"]:
-            # qwen3, glm45, nano_v3, and interns1 are reasoning by default
+
+        if not self.reasoning_parser:
+            # No reasoning parser configured, but reasoning is not off by default
+            # Allow reasoning to proceed
+            return True
+
+        if self.reasoning_parser in [
+            "deepseek-v3",
+            "qwen3",
+            "glm45",
+            "nano_v3",
+            "interns1",
+        ]:
+            # These models use enable_thinking parameter
             return (
                 not request.chat_template_kwargs
                 or request.chat_template_kwargs.get("enable_thinking", True) is True
             )
+
         return True  # default
 
     async def _process_tool_call_stream(

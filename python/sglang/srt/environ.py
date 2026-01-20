@@ -420,6 +420,14 @@ class Envs:
 
     # Tool-Call behavior
     SGLANG_TOOL_STRICT_LEVEL = EnvInt(ToolStrictLevel.OFF)
+    # Comma-separated list of token IDs to suppress when tool_choice is "none"
+    SGLANG_TOOL_TOKENS_TO_SUPPRESS = EnvTuple(tuple())
+    # Whether to apply logit bias to SGLANG_TOOL_TOKENS_TO_SUPPRESS when tool_choice is "none"
+    SGLANG_BIAS_TOOL_WHEN_NONE = EnvBool(False)
+    # Message to insert to prohibit tool calls (inserted into the last message, empty string disables)
+    SGLANG_INSERT_TOOL_PROHIBIT = EnvStr("")
+    # Method for inserting tool prohibition: "last_message" (append to last message) or "new_turn" (add new user turn)
+    SGLANG_INSERT_TOOL_PROHIBIT_METHOD = EnvStr("last_message")
 
     # Ngram
     SGLANG_NGRAM_FORCE_GREEDY_VERIFY = EnvBool(False)
@@ -447,6 +455,7 @@ class Envs:
 
     # TokenizerManager
     SGLANG_REQUEST_STATE_WAIT_TIMEOUT = EnvInt(4)
+    SGLANG_REASONING_OFF_BY_DEFAULT = EnvBool(False)
 
     # fmt: on
 
