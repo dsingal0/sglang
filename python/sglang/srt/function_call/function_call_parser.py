@@ -194,17 +194,7 @@ class FunctionCallParser:
             A tuple of (constraint_type, constraint_value) to be added to sampling parameters,
             or None if no constraint applies.
         """
-        # NOTE: structural_tag only supports JSON-compatible content between the begin and end.
-        # It cannot parse or validate function call Pythonic or XML-ish syntax.
-        if (
-            self.detector.supports_structural_tag()
-            and tool_choice == "auto"
-            and (
-                any(tool.function.strict for tool in self.tools)
-                or self.tool_strict_level >= ToolStrictLevel.FUNCTION
-            )
-        ):
-            tag = self.get_structure_tag()
-            return ("structural_tag", tag)
-        # Disable JSON schema constraint for tool calls to avoid repetition issues
-        # The parser-based approach is sufficient and doesn't cause out-of-distribution looping
+        # NOTE: Structural constraints are disabled by design. The customer never uses
+        # tool_choice=required or strict tools, so we rely purely on parser-based detection.
+        # This avoids issues with models outputting raw XML tags that don't match constraints.
+        return None

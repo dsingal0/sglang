@@ -35,14 +35,15 @@ class Qwen25Detector(BaseFormatDetector):
         Initializes the detector with necessary state variables.
         """
         super().__init__()
-        self.bot_token = "<tool_call>\n"
-        self.eot_token = "\n</tool_call>"
+        self.bot_token = "<tool_call>"
+        self.eot_token = "</tool_call>"
         self.tool_call_separator = "\n"
         self._normal_text_buffer = ""  # Buffer for handling partial end tokens
 
     def has_tool_call(self, text: str) -> bool:
         """Check if the text contains a Qwen 2.5 format tool call."""
-        return self.bot_token in text
+        # Check for both <tool_call> and <tool_call>\n patterns
+        return "<tool_call>" in text
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         """
@@ -52,13 +53,15 @@ class Qwen25Detector(BaseFormatDetector):
         :param tools: List of available tools.
         :return: ParseResult indicating success or failure, consumed text, leftover text, and parsed calls.
         """
-        idx = text.find(self.bot_token)
+        # Find the first <tool_call> tag (with or without newline)
+        idx = text.find("<tool_call>")
         normal_text = text[:idx].strip() if idx != -1 else text
-        if self.bot_token not in text:
+        if "<tool_call>" not in text:
             return StreamingParseResult(normal_text=normal_text, calls=[])
 
-        # Find all <tool_call>\n...\n</tool_call> blocks
-        pattern = rf"{re.escape(self.bot_token)}(.*?){re.escape(self.eot_token)}"
+        # Find all <tool_call>... </tool_call> blocks with optional newlines
+        # Pattern matches: <tool_call> followed by optional whitespace/newline, then content, then optional whitespace/newline, then </tool_call>
+        pattern = r"<tool_call>\s*(.*?)\s*</tool_call>"
         match_result_list = re.findall(pattern, text, re.DOTALL)
         calls = []
         for match_result in match_result_list:
@@ -114,7 +117,7 @@ class Qwen25Detector(BaseFormatDetector):
 
     def structure_info(self) -> _GetInfoFunc:
         return lambda name: StructureInfo(
-            begin='<tool_call>\n{"name":"' + name + '", "arguments":',
-            end="}\n</tool_call>",
+            begin='<tool_call>{"name":"' + name + '", "arguments":',
+            end="}</tool_call>",
             trigger="<tool_call>",
         )
