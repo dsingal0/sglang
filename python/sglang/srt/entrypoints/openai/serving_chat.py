@@ -114,9 +114,7 @@ class OpenAIServingChat(OpenAIServingBase):
                 f"Tool token suppression enabled. Tokens to suppress when tool_choice=none: {tool_tokens_to_suppress}"
             )
         if envs.SGLANG_BIAS_TOOL_WHEN_NONE.get():
-            logger.info(
-                f"Tool token logit bias enabled when tool_choice=none"
-            )
+            logger.info(f"Tool token logit bias enabled when tool_choice=none")
 
         # Check if the model is a GPT-OSS model
         self.is_gpt_oss = (
@@ -1128,38 +1126,10 @@ class OpenAIServingChat(OpenAIServingBase):
             if finish_reason["type"] == "stop":
                 finish_reason["type"] = "tool_calls"
                 finish_reason["matched"] = None
-            try:
-                # For required tool choice, we expect a JSON array of tool calls
-                tool_call_data = orjson.loads(text)
-                tool_calls = []
-                for i, tool in enumerate(tool_call_data):
-                    # Create a ToolCallItem from the JSON data
-                    call_info = ToolCallItem(
-                        tool_index=i,  # Use the loop index as tool_index
-                        name=tool["name"],
-                        parameters=json.dumps(tool["parameters"], ensure_ascii=False),
-                    )
-                    tool_id = self._process_tool_call_id(
-                        call_info, history_tool_calls_cnt
-                    )
-                    tool_calls.append(
-                        ToolCall(
-                            id=tool_id,
-                            index=i,
-                            function=FunctionResponse(
-                                name=tool["name"],
-                                arguments=json.dumps(
-                                    tool["parameters"], ensure_ascii=False
-                                ),
-                            ),
-                        )
-                    )
-                return ToolCallProcessingResult(tool_calls, "", finish_reason)
-            except json.JSONDecodeError as e:
-                logger.error(f"Tool call parsing error: {e}")
-                return ToolCallProcessingResult(None, text, finish_reason)
 
-        # Use parser since output is not constrained by JSON schema
+        # Use parser to detect and parse tool calls from the response text
+        # This handles both XML-wrapped tool calls (e.g., <tool_call>...</tool_call>)
+        # and direct JSON formats
         parser = FunctionCallParser(tools, self.tool_call_parser)
         if parser.has_tool_call(text):
             if finish_reason["type"] == "stop":
